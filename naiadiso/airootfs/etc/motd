@@ -1,0 +1,19 @@
+[38;2;17;136;160m~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~[0m
+  [38;2;30;200;232m[1ma guide, not a gatekeeper[0m
+
+  [38;2;21;168;200m1. network[0m  (needed before installing)
+    ethernet        connects automatically
+    [1mnmtui[0m           connect to Wi-Fi
+    [1mping archlinux.org[0m
+                    check you're online
+
+  [38;2;21;168;200m2. install[0m
+    [1mnaiadinstall[0m    guided TUI installer
+                    kernel: LTS / Stable / Both
+    [1mby hand[0m         the Arch way: fdisk, pacstrap,
+                    arch-chroot - all tools included
+
+  [38;2;21;168;200mdisks[0m
+    [1mlsblk[0m           list disks before you touch one
+    UEFI only - boot this stick in UEFI mode
+[38;2;17;136;160m~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~[0m

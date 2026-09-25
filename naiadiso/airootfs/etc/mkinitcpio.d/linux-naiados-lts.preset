@@ -1,0 +1,6 @@
+ALL_config="/etc/mkinitcpio.conf"
+ALL_kver="/boot/vmlinuz-naiados-lts"
+
+PRESETS=('default')
+
+default_image="/boot/initramfs-naiados-lts.img"

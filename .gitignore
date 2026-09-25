@@ -1,0 +1,22 @@
+# makepkg output
+*.pkg.tar.zst
+*.pkg.tar.zst.sig
+pkg/
+src/
+
+# kernel source tarballs downloaded by makepkg
+kernel/*/linux-*.tar.xz
+kernel/*/linux-*.tar.sign
+
+# compiled binaries (rebuild from source)
+naiadinstall/naiadinstall
+NaiadTools/*/naiadcheck
+!NaiadTools/*/*.cpp
+!NaiadTools/*/*.h
+naiadiso/airootfs/usr/bin/naiadinstall
+
+# local pacman repo: built packages + db, moving to GitHub Releases
+naiadiso/airootfs/root/naiados-repo/
+
+# makepkg logs
+kernel/build-*.log

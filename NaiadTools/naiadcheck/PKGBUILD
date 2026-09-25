@@ -1,0 +1,17 @@
+pkgname=naiadcheck
+pkgver=1.0
+pkgrel=2
+pkgdesc="NaiadOS system health check tool"
+arch=('x86_64')
+depends=('gcc-libs' 'smartmontools')
+source=()
+
+build() {
+    cd "$startdir"
+    g++ -march=x86-64 -mtune=generic -mno-avx -mno-avx2 -mno-sse4.2 naiadcheck.cpp -o naiadcheck
+}
+
+package() {
+    cd "$startdir"
+    install -Dm755 naiadcheck "$pkgdir/usr/bin/naiadcheck"
+}

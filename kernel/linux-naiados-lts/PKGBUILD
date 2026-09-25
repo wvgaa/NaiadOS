@@ -1,0 +1,52 @@
+# NaiadOS kernel: LTS, debloated
+pkgname=linux-naiados-lts
+_suffix=naiados-lts
+pkgver=6.18.53
+pkgrel=2
+pkgdesc="The NaiadOS kernel (LTS, debloated)"
+arch=(x86_64)
+url="https://www.kernel.org"
+license=(GPL-2.0-only)
+depends=(coreutils kmod mkinitcpio)
+makedepends=(bc cpio gettext libelf openssl pahole perl python tar xz zstd)
+options=(!debug !strip)
+source=("https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$pkgver.tar.xz"
+        config
+        initramfs.sh
+        90-$pkgname.hook
+        60-$pkgname-remove.hook)
+sha256sums=('4d6fba95c2244b08a7b4144a4d38b9be4fb31abb5e7682ae40bb5cb11374cfe0'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP')
+
+prepare() {
+  cd "linux-$pkgver"
+  cp ../config .config
+  # baked in so modules land in /usr/lib/modules/<ver>-$_suffix
+  scripts/config --set-str LOCALVERSION "-$_suffix" --disable LOCALVERSION_AUTO
+  make olddefconfig
+}
+
+build() {
+  cd "linux-$pkgver"
+  make -j"$(nproc)" bzImage modules
+}
+
+package() {
+  cd "linux-$pkgver"
+  local kernver="$(make -s kernelrelease)"
+
+  install -Dm644 "$(make -s image_name)" "$pkgdir/boot/vmlinuz-$_suffix"
+  install -Dm644 .config "$pkgdir/boot/config-$_suffix"
+
+  make INSTALL_MOD_PATH="$pkgdir/usr" INSTALL_MOD_STRIP=1 modules_install
+  # points into the makepkg build dir, which won't exist on the target
+  rm -f "$pkgdir/usr/lib/modules/$kernver/build"
+
+  # regenerate the initramfs on kernel/mkinitcpio/firmware updates
+  install -Dm755 ../initramfs.sh "$pkgdir/usr/share/libalpm/scripts/$pkgname-initramfs"
+  install -Dm644 ../90-$pkgname.hook "$pkgdir/usr/share/libalpm/hooks/90-$pkgname.hook"
+  install -Dm644 ../60-$pkgname-remove.hook "$pkgdir/usr/share/libalpm/hooks/60-$pkgname-remove.hook"
+}

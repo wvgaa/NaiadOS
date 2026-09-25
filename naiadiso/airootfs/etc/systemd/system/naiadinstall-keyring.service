@@ -1,0 +1,14 @@
+[Unit]
+Description=Initialize pacman keyring for NaiadOS installer
+After=systemd-random-seed.service
+
+# Offline only: must never delay the login. The online keyring update
+# (pacman -Sy archlinux-keyring) runs in naiadinstall once there is internet.
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/pacman-key --init
+ExecStart=/usr/bin/pacman-key --populate archlinux
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+[Trigger]
+Type = Path
+Operation = Remove
+Target = boot/vmlinuz-naiados
+
+[Action]
+Description = Removing linux-naiados initramfs...
+When = PreTransaction
+Exec = /usr/share/libalpm/scripts/linux-naiados-initramfs remove

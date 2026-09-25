@@ -1,0 +1,29 @@
+{
+    "logo": {
+        "source": "/etc/fastfetch/naiados.txt",
+        "color": {
+            "1": "cyan"
+        }
+    },
+    "display": {
+        "color": "cyan"
+    },
+    "modules": [
+        "title",
+        "separator",
+        "os",
+        "kernel",
+        "uptime",
+        "packages",
+        "shell",
+        "display",
+        "de",
+        "wm",
+        "terminal",
+        "cpu",
+        "gpu",
+        "memory",
+        "disk",
+        "swap"
+    ]
+}
