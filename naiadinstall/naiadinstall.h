@@ -2548,6 +2548,23 @@ void printExistingBootloaderSteps(const InstallConfig &config) {
     std::cout << "            (systemd-boot can only read kernels from the EFI partition: copy them there first)" << std::endl;
 }
 
+// Boot numbers of firmware entries whose loader path contains `path`
+// (case-insensitive), e.g. "\\efi\\naiados\\".
+std::vector<std::string> bootEntriesWithPath(const std::string &path) {
+    std::vector<std::string> nums;
+    FILE *pipe = popen("efibootmgr 2>/dev/null", "r");
+    if (!pipe) return nums;
+    char buffer[1024];
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        std::string line(buffer);
+        std::transform(line.begin(), line.end(), line.begin(), ::tolower);
+        if (line.rfind("boot", 0) != 0 || line.size() < 10 || !isxdigit((unsigned char)line[4])) continue;
+        if (line.find(path) != std::string::npos) nums.push_back(line.substr(4, 4));
+    }
+    pclose(pipe);
+    return nums;
+}
+
 bool installBootloader(InstallConfig &config) {
     if (config.bootloader == "Existing") return true;
 
@@ -2572,11 +2589,31 @@ bool installBootloader(InstallConfig &config) {
 
     std::cout << "\n==> Installing bootloader to: " << disk << std::endl;
 
+    // grub 2.16 keeps an existing entry with the same path untouched, even when
+    // it points at an EFI partition that no longer exists (reinstall with a new
+    // ESP): the firmware then finds nothing to boot. Old NaiadOS entries go first.
+    for (const auto &num : bootEntriesWithPath("\\efi\\naiados\\")) {
+        std::cout << "==> Removing old NaiadOS boot entry Boot" << num << std::endl;
+        system(("efibootmgr -q -b " + num + " -B").c_str());
+    }
+
     std::string cmd1 = "arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=NaiadOS " + disk;
     int result1 = system(cmd1.c_str());
     if (result1 != 0) {
         std::cout << "[ERROR] grub-install failed on " << disk << std::endl;
         return false;
+    }
+
+    // The standard fallback path, for firmware that ignores or loses boot entries
+    // (HP). Never overwrites another system's fallback loader.
+    if (system("test -e /mnt/boot/efi/EFI/BOOT/BOOTX64.EFI") != 0) {
+        std::cout << "==> Installing fallback loader EFI/BOOT/BOOTX64.EFI" << std::endl;
+        system("mkdir -p /mnt/boot/efi/EFI/BOOT && cp /mnt/boot/efi/EFI/NaiadOS/grubx64.efi /mnt/boot/efi/EFI/BOOT/BOOTX64.EFI");
+    }
+
+    if (bootEntriesWithPath("\\efi\\naiados\\").empty()) {
+        std::cout << "[WARNING] No NaiadOS boot entry in the firmware (NVRAM full or read-only?)." << std::endl;
+        std::cout << "          The fallback loader should still boot it; otherwise pick the disk in the boot menu." << std::endl;
     }
 
     std::string cmd2 = "arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg";
