@@ -82,6 +82,7 @@ struct InstallConfig {
     std::string networkBackend = "";
     std::string kernel = "LTS";
     std::string bootloader = "GRUB";   // "GRUB" or "Existing" (install none, keep the machine's current one)
+    bool freshEsp = false;             // the disk setup created a new, empty EFI partition
 };
 
 // Labels of the firmware's boot entries (efibootmgr, read-only), e.g.
@@ -129,10 +130,19 @@ std::string kernelSuffix(const std::string &package) {
 
 struct FreeSpaceRegion {
     std::string diskName;
-    std::string startMB;
-    std::string endMB;
-    std::string sizeMB;
+    long long startS = 0;   // first sector, aligned to 1 MiB
+    long long endS = 0;     // last sector (inclusive)
+    long long sizeGiB = 0;
 };
+
+// Undo whatever an earlier disk step mounted, so a new choice starts clean.
+void releaseInstallTarget() {
+    system("swapoff -a 2>/dev/null");
+    system("umount -R /mnt 2>/dev/null");
+}
+
+// Partition names currently on a disk, e.g. {"nvme0n1p1", "nvme0n1p3"}.
+std::vector<std::string> partitionNames(const std::string &diskName);
 
 
 struct PartInfo {
@@ -218,33 +228,51 @@ std::vector<std::string> detectDisks() {
     return disks;
 }
 
-std::vector<FreeSpaceRegion> detectFreeSpace(const std::string &diskName) {
+// Free regions of at least 8 GiB (the install minimum). Works in exact sectors:
+// parted's MB output is rounded, and a start rounded down would overlap the
+// previous partition. Only GPT disks: an msdos label has no ESP type GUID.
+std::vector<FreeSpaceRegion> detectFreeSpace(const std::string &diskName, std::string &label) {
     std::vector<FreeSpaceRegion> regions;
-    std::string cmd = "parted -m /dev/" + diskName + " unit MB print free 2>/dev/null";
+    std::string cmd = "parted -m /dev/" + diskName + " unit s print free 2>/dev/null";
 
     FILE* pipe = popen(cmd.c_str(), "r");
     if (!pipe) return regions;
 
-    char buffer[256];
+    long long sectorSize = 512;
+    char buffer[512];
     while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
         std::string line(buffer);
-        if (line.find("free") == std::string::npos) continue;
-
         std::vector<std::string> fields;
         size_t pos = 0;
         while ((pos = line.find(':')) != std::string::npos) {
             fields.push_back(line.substr(0, pos));
             line.erase(0, pos + 1);
         }
-
-        if (fields.size() >= 3) {
-            FreeSpaceRegion region;
-            region.diskName = diskName;
-            region.startMB = fields[1];
-            region.endMB = fields[2];
-            if (fields.size() >= 4) region.sizeMB = fields[3];
-            regions.push_back(region);
+        // disk line: /dev/sda:1000215216s:scsi:512:4096:gpt:Model:;
+        if (fields.size() >= 6 && fields[0] == "/dev/" + diskName) {
+            sectorSize = atoll(fields[3].c_str());
+            label = fields[5];
+            continue;
         }
+        // free line: 1:1026048s:976773119s:975747072s:free;
+        if (fields.size() < 4 || line.rfind("free", 0) != 0) continue;
+
+        long long align = 1048576 / (sectorSize > 0 ? sectorSize : 512);
+        long long startS = atoll(fields[1].c_str());
+        long long endS = atoll(fields[2].c_str());
+        startS = ((startS + align - 1) / align) * align;
+        endS = ((endS + 1) / align) * align - 1;
+        if (endS <= startS) continue;
+
+        long long sizeGiB = (endS - startS + 1) * sectorSize / (1024LL * 1024 * 1024);
+        if (sizeGiB < 8) continue;
+
+        FreeSpaceRegion region;
+        region.diskName = diskName;
+        region.startS = startS;
+        region.endS = endS;
+        region.sizeGiB = sizeGiB;
+        regions.push_back(region);
     }
 
     pclose(pipe);
@@ -274,8 +302,21 @@ std::vector<PartInfo> detectPartitions(const std::string &diskName = "") {
     return parts;
 }
 
+std::vector<std::string> partitionNames(const std::string &diskName) {
+    std::vector<std::string> names;
+    for (const auto &p : detectPartitions(diskName)) names.push_back(p.name);
+    return names;
+}
+
 bool isEsp(const PartInfo &p) {
     return p.parttype == ESP_GUID;
+}
+
+bool hasEsp(const std::string &diskName) {
+    for (const auto &p : detectPartitions(diskName)) {
+        if (isEsp(p)) return true;
+    }
+    return false;
 }
 
 bool holdsLinux(const PartInfo &p) {
@@ -1107,6 +1148,11 @@ void configureBootloader(InstallConfig &config) {
             if (selected >= (int)options.size()) selected = 0;
         }
         else if (key == 10 || key == KEY_ENTER) {
+            if (options[selected] == "Existing" && config.freshEsp) {
+                showMessage({"The disk setup created a new, empty EFI partition, so there is no",
+                             "existing bootloader left to keep. Choose NaiadOS GRUB."});
+                continue;
+            }
             if (options[selected] == "Existing" && found.empty()) {
                 showMessage({"No other bootloader was found on this machine.",
                              "Without one, NaiadOS would not boot. Choose NaiadOS GRUB."});
@@ -1202,11 +1248,7 @@ bool confirmDiskWipe(const std::string &diskName) {
 
     bool confirmed = confirmTypedYes(warning);
 
-    if (confirmed) {
-        system("swapoff /mnt/swapfile 2>/dev/null");
-        system("umount /mnt/boot/efi 2>/dev/null");
-        system("umount /mnt 2>/dev/null");
-    }
+    if (confirmed) releaseInstallTarget();
 
     return confirmed;
 }
@@ -1487,7 +1529,14 @@ void configureExistingPartition(InstallConfig &config) {
                 warning.push_back("WARNING: it holds a " + part.fstype + " filesystem. Its files will be lost.");
             }
 
+            if (!hasEsp(part.disk)) {
+                showMessage({"/dev/" + part.disk + " has no EFI system partition, so NaiadOS could not boot from it.",
+                             "Nothing was formatted. Use manual partitioning (cfdisk) to create one."});
+                continue;
+            }
+
             if (!confirmTypedYes(warning)) continue;
+            releaseInstallTarget();
 
             clear();
             mvprintw(0, 2, "Formatting /dev/%s as ext4, please wait...", part.name.c_str());
@@ -1514,14 +1563,14 @@ void configureExistingPartition(InstallConfig &config) {
             }
 
             if (!mountExistingEFI(part.disk)) {
-                clear();
-                mvprintw(0, 2, "WARNING: No existing EFI partition found! Bootloader install may fail.");
-                mvprintw(1, 2, "Press any key to continue anyway.");
-                refresh();
-                getch();
+                releaseInstallTarget();
+                showMessage({"The EFI partition could not be mounted, so the disk setup was undone.",
+                             "Choose the partition again."});
+                continue;
             }
 
             config.diskDevice = part.name;
+            config.freshEsp = false;
             showDiskResultSummary();
             choosing = false;
         }
@@ -1576,13 +1625,21 @@ void configureFreeSpace(InstallConfig &config) {
         }
     }
 
-    std::vector<FreeSpaceRegion> regions = detectFreeSpace(chosenDisk);
+    std::string label;
+    std::vector<FreeSpaceRegion> regions = detectFreeSpace(chosenDisk, label);
 
+    if (label != "gpt") {
+        showMessage({"/dev/" + chosenDisk + " has no GPT partition table (found: " + (label.empty() ? "none" : label) + ").",
+                     "NaiadOS boots in UEFI mode and needs GPT. Use manual partitioning (cfdisk) instead."});
+        return;
+    }
+    if (!hasEsp(chosenDisk)) {
+        showMessage({"/dev/" + chosenDisk + " has no EFI system partition, so NaiadOS could not boot from it.",
+                     "Use manual partitioning (cfdisk) to create one."});
+        return;
+    }
     if (regions.empty()) {
-        clear();
-        mvprintw(0, 2, "No free space found on this disk!");
-        refresh();
-        getch();
+        showMessage({"No free space of 8 GB or more on /dev/" + chosenDisk + "."});
         return;
     }
 
@@ -1591,12 +1648,13 @@ void configureFreeSpace(InstallConfig &config) {
 
     while (choosingRegion) {
         clear();
-        mvprintw(0, 2, "Select free space region to use:");
+        mvprintw(0, 2, "Select free space region to use (8 GB or more):");
 
         for (int i = 0; i < (int)regions.size(); i++) {
-            std::string label = regions[i].startMB + " - " + regions[i].endMB + " (" + regions[i].sizeMB + " free)";
+            std::string line = std::to_string(regions[i].sizeGiB) + " GB free  (sectors " +
+                               std::to_string(regions[i].startS) + " - " + std::to_string(regions[i].endS) + ")";
             if (i == selected) attron(A_REVERSE);
-            mvprintw(i + 2, 4, "%s", label.c_str());
+            mvprintw(i + 2, 4, "%s", line.c_str());
             if (i == selected) attroff(A_REVERSE);
         }
 
@@ -1615,20 +1673,21 @@ void configureFreeSpace(InstallConfig &config) {
             FreeSpaceRegion chosen = regions[selected];
             std::string disk = "/dev/" + chosenDisk;
 
+            releaseInstallTarget();
+
             clear();
             mvprintw(0, 2, "Creating partition in free space, please wait...");
             refresh();
 
-            std::string cmd = "parted -m --script " + disk + " unit MB mkpart \"root\" ext4 " + chosen.startMB + " " + chosen.endMB;
-            std::string partErr;
-            int result = runWithError(cmd, partErr);
+            // the new partition is whatever appears on the disk now; parted lists
+            // partitions by position, and a new one takes the lowest free number
+            std::vector<std::string> before = partitionNames(chosenDisk);
 
-            if (result != 0) {
-                clear();
-                mvprintw(0, 2, "Partitioning failed! Press any key to return.");
-                mvprintw(1, 2, "%s", partErr.c_str());
-                refresh();
-                getch();
+            std::string cmd = "parted -m --script " + disk + " unit s mkpart root ext4 " +
+                              std::to_string(chosen.startS) + "s " + std::to_string(chosen.endS) + "s";
+            std::string partErr;
+            if (runWithError(cmd, partErr) != 0) {
+                showMessage({"Partitioning failed:", partErr});
                 choosingRegion = false;
                 continue;
             }
@@ -1636,83 +1695,45 @@ void configureFreeSpace(InstallConfig &config) {
             system(("partprobe " + disk).c_str());
             system("udevadm settle");
 
-            std::string printCmd = "parted -m " + disk + " unit MB print 2>/dev/null";
-            FILE* pipe = popen(printCmd.c_str(), "r");
-            std::string newPartNum = "";
-            std::string lastLine = "";
-            if (pipe) {
-                char buffer[256];
-                while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-                    std::string line(buffer);
-                    if (!line.empty() && isdigit(line[0])) {
-                        lastLine = line;
-                    }
-                }
-                pclose(pipe);
+            std::vector<std::string> added;
+            for (const auto &name : partitionNames(chosenDisk)) {
+                if (std::find(before.begin(), before.end(), name) == before.end()) added.push_back(name);
             }
-
-            if (!lastLine.empty()) {
-                size_t colonPos = lastLine.find(':');
-                if (colonPos != std::string::npos) {
-                    newPartNum = lastLine.substr(0, colonPos);
-                }
-            }
-
-            if (newPartNum.empty()) {
-                clear();
-                mvprintw(0, 2, "Could not determine new partition number! Press any key to return.");
-                refresh();
-                getch();
+            if (added.size() != 1) {
+                showMessage({"Could not tell which partition is the new one, so nothing was formatted.",
+                             "Check the disk with lsblk and use manual partitioning instead."});
                 choosingRegion = false;
                 continue;
             }
-
-            std::string partPrefix = chosenDisk;
-            if (chosenDisk.find("nvme") != std::string::npos || chosenDisk.find("mmcblk") != std::string::npos) {
-                partPrefix += "p";
-            }
-            std::string newPartition = "/dev/" + partPrefix + newPartNum;
+            std::string newPartition = "/dev/" + added[0];
 
             clear();
             mvprintw(0, 2, "Formatting %s, please wait...", newPartition.c_str());
             refresh();
 
             std::string err;
-            int formatResult = formatPartition(newPartition, "ext4", err);
-            if (formatResult != 0) {
-                std::cout << "\n[ERROR] Failed to format " << newPartition << ": " << err << std::endl;
-            }
-
-            if (formatResult != 0) {
-                clear();
-                mvprintw(0, 2, "Formatting failed! Press any key to return.");
-                refresh();
-                getch();
+            if (formatPartition(newPartition, "ext4", err) != 0) {
+                showMessage({"Formatting " + newPartition + " failed:", err});
                 choosingRegion = false;
                 continue;
             }
 
-            std::string mountErr;
-            int mountResult = mountPartition(newPartition, "/mnt", "ext4", mountErr);
-            if (mountResult != 0) {
-                clear();
-                mvprintw(0, 2, "Mounting failed! Press any key to return.");
-                mvprintw(1, 2, "%s", mountErr.c_str());
-                refresh();
-                getch();
+            if (mountPartition(newPartition, "/mnt", "ext4", err) != 0) {
+                showMessage({"Mounting " + newPartition + " failed:", err});
                 choosingRegion = false;
                 continue;
             }
 
             if (!mountExistingEFI(chosenDisk)) {
-                clear();
-                mvprintw(0, 2, "WARNING: No existing EFI partition found! Bootloader install may fail.");
-                mvprintw(1, 2, "Press any key to continue anyway.");
-                refresh();
-                getch();
+                releaseInstallTarget();
+                showMessage({"The EFI partition could not be mounted, so the disk setup was undone.",
+                             newPartition + " stays on the disk (empty); choose it again under 'Use an existing partition'."});
+                choosingRegion = false;
+                continue;
             }
 
-            config.diskDevice = chosenDisk;
+            config.diskDevice = added[0];
+            config.freshEsp = false;
             showDiskResultSummary();
             choosingRegion = false;
         }
@@ -1801,6 +1822,7 @@ if (confirmDiskWipe(disks[selected])) {
     }
 
         config.diskDevice = disks[selected];
+        config.freshEsp = true;
         showDiskResultSummary();
         choosing = false;
     }
@@ -1905,8 +1927,7 @@ void configureManualPartitioning(InstallConfig &config) {
     std::string disk = disks[d];
 
     // release anything an earlier disk step mounted, so cfdisk can rewrite the table
-    system("swapoff -a 2>/dev/null");
-    system("umount -R /mnt 2>/dev/null");
+    releaseInstallTarget();
 
     def_prog_mode();
     endwin();
@@ -2076,6 +2097,7 @@ void configureManualPartitioning(InstallConfig &config) {
     }
 
     config.diskDevice = root.name;
+    config.freshEsp = formatEsp;
     showDiskResultSummary();
 }
 
@@ -2858,6 +2880,12 @@ while (choosing) {
 }
 
 bool validateConfig(InstallConfig &config) {
+    if (config.bootloader == "Existing" && config.freshEsp) {
+        showMessage({"Bootloader is set to 'keep existing', but the disk setup created a new, empty",
+                     "EFI partition: nothing would boot NaiadOS. Set Bootloader to NaiadOS GRUB."});
+        return false;
+    }
+
     std::vector<std::string> missing;
     if (config.hostname.empty()) missing.push_back("Hostname");
     if (config.keyboardLayout.empty()) missing.push_back("Keyboard Layout");
