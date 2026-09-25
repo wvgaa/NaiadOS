@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.4 beta
+## 1.0.4 beta (2026-09-25)
 
 ### Added
 - Kernel choice in the installer: LTS (default), Stable, or both. With both, Stable boots by default and LTS stays in GRUB as a fallback.
@@ -32,12 +32,18 @@
 - GRUB 2.16 filled the boot menu with an "EFI BootNext" entry for every firmware slot. These entries are disabled.
 - fastfetch was not installed although its config was.
 - The "chroot into installation" option at the end of the install did not work.
+- "Use free space" could format the wrong partition when the disk had gaps in its partition numbering. It now formats only the partition it created.
+- "Use free space" only offers regions of 8 GB or more, works in exact sectors and requires a GPT disk.
+- Without an EFI partition on the disk, "Use free space" and "Use an existing partition" stop before formatting instead of failing at the bootloader step.
+- "Keep existing bootloader" can no longer be combined with a disk setup that creates a new EFI partition.
+- Switching between disk options no longer leaves earlier mounts or swap active.
+- After reinstalling with a new EFI partition, the firmware kept the old NaiadOS boot entry and found nothing to boot. Old entries are now replaced, and GRUB is also installed to the fallback path EFI/BOOT/BOOTX64.EFI.
 
 ### Kernel
 - linux-naiados 7.2.7 and linux-naiados-lts 6.18.53 replace the single 7.0.12 kernel. Both are built from the same debloated config for baseline x86-64.
 - Kernel updates now rebuild the initramfs automatically (pacman hook), and removing a kernel removes its initramfs.
 - BTF is enabled again, which brings back sched_ext and fixes systemd's bpf-restrict-fs error at boot.
-- Modules are zstd compressed. Installed size went from about 495 MB to about 143 MB per kernel.
+- Modules are zstd compressed. Installed size went from about 495 MB to about 180 MB per kernel.
 - Intel Xe graphics driver enabled (Intel Arc, Lunar Lake, Panther Lake).
 - SELinux, Smack and TOMOYO removed.
 
