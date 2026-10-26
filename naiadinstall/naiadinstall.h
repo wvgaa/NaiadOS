@@ -43,14 +43,17 @@ inline int runWithError(const std::string &cmd, std::string &errorOut) {
     return pclose(pipe);
 }
 
-// Formats dev as fs ("ext4", "vfat" or "swap"). Old signatures are wiped first:
+// Formats dev as fs ("ext4", "btrfs", "xfs", "f2fs", "vfat" or "swap"). Old signatures are wiped first:
 // leftover NTFS traces next to a fresh ext4 made mount guess the wrong type.
 inline int formatPartition(const std::string &dev, const std::string &fs, std::string &errorOut) {
     int result = runWithError("wipefs -a " + dev, errorOut);
     if (result != 0) return result;
 
     std::string cmd = "mkfs.ext4 -F ";
-    if (fs == "vfat") cmd = "mkfs.fat -F32 ";
+    if (fs == "btrfs") cmd = "mkfs.btrfs -f ";
+    else if (fs == "xfs") cmd = "mkfs.xfs -f ";
+    else if (fs == "f2fs") cmd = "mkfs.f2fs -f ";
+    else if (fs == "vfat") cmd = "mkfs.fat -F32 ";
     else if (fs == "swap") cmd = "mkswap ";
 
     result = runWithError(cmd + dev, errorOut);
@@ -80,6 +83,7 @@ struct InstallConfig {
     std::string audioSystem = "";
     std::string timezone = "";
     std::string networkBackend = "";
+    std::string filesystem = "ext4";   // root (and a formatted /home): ext4, btrfs, xfs or f2fs
     std::string kernel = "LTS";
     std::string bootloader = "GRUB";   // "GRUB" or "Existing" (install none, keep the machine's current one)
     bool freshEsp = false;             // the disk setup created a new, empty EFI partition
@@ -114,6 +118,14 @@ std::vector<std::string> detectBootEntries() {
     }
     pclose(pipe);
     return labels;
+}
+
+// userspace tools for the root filesystem; e2fsprogs already comes with base
+std::string filesystemPackage(const std::string &fs) {
+    if (fs == "btrfs") return "btrfs-progs";
+    if (fs == "xfs") return "xfsprogs";
+    if (fs == "f2fs") return "f2fs-tools";
+    return "";
 }
 
 // "Both" installs stable + LTS side by side, LTS stays in GRUB as the fallback
@@ -1106,6 +1118,62 @@ void configureKernel(InstallConfig &config) {
 
 void showMessage(const std::vector<std::string> &lines);
 
+// The disk flows format right away, so the filesystem is picked before
+// Disk Configuration. Changing it afterwards drops the finished disk setup.
+void configureFilesystem(InstallConfig &config) {
+    std::vector<std::string> options = {"ext4", "btrfs", "xfs", "f2fs"};
+    std::vector<std::string> descriptions = {
+        "ext4   - the safe default, mature and fast",
+        "btrfs  - copy-on-write, compression, subvolumes and snapshots",
+        "xfs    - fast with large files and big disks; cannot be shrunk",
+        "f2fs   - made for flash storage (SSD, NVMe, SD cards)"
+    };
+
+    int selected = 0;
+    for (int i = 0; i < (int)options.size(); i++) {
+        if (options[i] == config.filesystem) selected = i;
+    }
+    bool choosing = true;
+
+    while (choosing) {
+        clear();
+        mvprintw(0, 2, "Select the root filesystem:");
+        mvprintw(1, 2, "Also used for /home if you format a separate one. The EFI partition stays FAT32.");
+
+        for (int i = 0; i < (int)options.size(); i++) {
+            if (i == selected) attron(A_REVERSE);
+            mvprintw(i + 3, 4, "%s", descriptions[i].c_str());
+            if (i == selected) attroff(A_REVERSE);
+        }
+
+        refresh();
+        int key = getch();
+
+        if (key == KEY_UP) {
+            selected--;
+            if (selected < 0) selected = (int)options.size() - 1;
+        }
+        else if (key == KEY_DOWN) {
+            selected++;
+            if (selected >= (int)options.size()) selected = 0;
+        }
+        else if (key == 10 || key == KEY_ENTER) {
+            if (options[selected] != config.filesystem && !config.diskDevice.empty()) {
+                releaseInstallTarget();
+                config.diskDevice = "";
+                config.freshEsp = false;
+                showMessage({"The disk was already set up as " + config.filesystem + ".",
+                             "That setup was undone. Run Disk Configuration again to format it as " + options[selected] + "."});
+            }
+            config.filesystem = options[selected];
+            choosing = false;
+        }
+        else if (key == 27) {
+            choosing = false;
+        }
+    }
+}
+
 void configureBootloader(InstallConfig &config) {
     std::vector<std::string> found = detectBootEntries();
 
@@ -1292,6 +1360,7 @@ bool autoPartitionDisk(const std::string &diskName) {
         return false;
     }
 
+    // parted's type hint only sets the GPT "Linux filesystem" type; mkfs decides the real one
     int result3 = runWithError("parted --script " + disk + " mkpart \"root\" ext4 513MiB 100%", err);
     if (result3 != 0) {
         std::cout << "\n[ERROR] Failed to create root partition: " << err << std::endl;
@@ -1310,7 +1379,7 @@ bool autoPartitionDisk(const std::string &diskName) {
     return true;
 }
 
-bool formatPartitions(const std::string &diskName) {
+bool formatPartitions(const std::string &diskName, const std::string &fs) {
     std::string partPrefix = diskName;
     if (diskName.find("nvme") != std::string::npos || diskName.find("mmcblk") != std::string::npos) {
         partPrefix += "p";
@@ -1326,7 +1395,7 @@ bool formatPartitions(const std::string &diskName) {
         return false;
     }
 
-    int result2 = formatPartition(rootPartition, "ext4", err);
+    int result2 = formatPartition(rootPartition, fs, err);
     if (result2 != 0) {
         std::cout << "\n[ERROR] Failed to format root partition " << rootPartition << ": " << err << std::endl;
         return false;
@@ -1335,7 +1404,7 @@ bool formatPartitions(const std::string &diskName) {
     return true;
 }
 
-bool mountPartitions(const std::string &diskName) {
+bool mountPartitions(const std::string &diskName, const std::string &fs) {
     std::string partPrefix = diskName;
     if (diskName.find("nvme") != std::string::npos || diskName.find("mmcblk") != std::string::npos) {
         partPrefix += "p";
@@ -1345,7 +1414,7 @@ bool mountPartitions(const std::string &diskName) {
     std::string rootPartition = "/dev/" + partPrefix + "2";
     std::string err;
 
-    int result1 = mountPartition(rootPartition, "/mnt", "ext4", err);
+    int result1 = mountPartition(rootPartition, "/mnt", fs, err);
     if (result1 != 0) {
         std::cout << "\n[ERROR] Failed to mount root partition " << rootPartition << ": " << err << std::endl;
         return false;
@@ -1417,7 +1486,7 @@ bool mountExistingEFI(const std::string &diskName) {
     return true;
 }
 
-bool createSwapfile() {
+bool createSwapfile(const std::string &fs) {
     std::string memCmd = "free -g | awk '/^Mem:/{print $2}'";
     FILE* pipe = popen(memCmd.c_str(), "r");
     int ramGB = 4;
@@ -1438,18 +1507,34 @@ bool createSwapfile() {
 
     std::string err;
 
-    int result1 = runWithError("fallocate -l " + std::to_string(swapGB) + "G /mnt/swapfile", err);
-    if (result1 != 0) {
-        std::cout << "\n[ERROR] Failed to create swapfile: " << err << std::endl;
-        return false;
-    }
+    // btrfs needs a no-copy-on-write file (mkswapfile also runs mkswap);
+    // f2fs needs the file pinned before its blocks are allocated
+    if (fs == "btrfs") {
+        if (runWithError("btrfs filesystem mkswapfile --size " + std::to_string(swapGB) + "g /mnt/swapfile", err) != 0) {
+            std::cout << "\n[ERROR] Failed to create swapfile: " << err << std::endl;
+            return false;
+        }
+    } else {
+        if (fs == "f2fs") {
+            system("touch /mnt/swapfile");
+            if (runWithError("f2fs_io pinfile set /mnt/swapfile", err) != 0) {
+                std::cout << "\n[ERROR] Failed to pin swapfile: " << err << std::endl;
+                return false;
+            }
+        }
+        int result1 = runWithError("fallocate -l " + std::to_string(swapGB) + "G /mnt/swapfile", err);
+        if (result1 != 0) {
+            std::cout << "\n[ERROR] Failed to create swapfile: " << err << std::endl;
+            return false;
+        }
 
-    system("chmod 600 /mnt/swapfile");
+        system("chmod 600 /mnt/swapfile");
 
-    int result3 = runWithError("mkswap /mnt/swapfile", err);
-    if (result3 != 0) {
-        std::cout << "\n[ERROR] Failed to set up swap: " << err << std::endl;
-        return false;
+        int result3 = runWithError("mkswap /mnt/swapfile", err);
+        if (result3 != 0) {
+            std::cout << "\n[ERROR] Failed to set up swap: " << err << std::endl;
+            return false;
+        }
     }
 
     int result4 = runWithError("swapon /mnt/swapfile", err);
@@ -1485,7 +1570,7 @@ void configureExistingPartition(InstallConfig &config) {
 
     while (choosing) {
         clear();
-        mvprintw(0, 2, "Select an existing partition for the NaiadOS root (it will be FORMATTED as ext4):");
+        mvprintw(0, 2, "Select an existing partition for the NaiadOS root (it will be FORMATTED as %s):", config.filesystem.c_str());
         mvprintw(1, 2, "Not listed: the live USB, mounted partitions and EFI partitions.");
 
         for (int i = 0; i < (int)partitions.size(); i++) {
@@ -1509,7 +1594,7 @@ void configureExistingPartition(InstallConfig &config) {
             const PartInfo &part = partitions[selected];
 
             std::vector<std::string> warning = {
-                "You are about to FORMAT this partition as ext4:",
+                "You are about to FORMAT this partition as " + config.filesystem + ":",
                 "",
                 "    /dev/" + describePartition(part),
                 "",
@@ -1539,11 +1624,11 @@ void configureExistingPartition(InstallConfig &config) {
             releaseInstallTarget();
 
             clear();
-            mvprintw(0, 2, "Formatting /dev/%s as ext4, please wait...", part.name.c_str());
+            mvprintw(0, 2, "Formatting /dev/%s as %s, please wait...", part.name.c_str(), config.filesystem.c_str());
             refresh();
 
             std::string err;
-            if (formatPartition("/dev/" + part.name, "ext4", err) != 0) {
+            if (formatPartition("/dev/" + part.name, config.filesystem, err) != 0) {
                 clear();
                 mvprintw(0, 2, "Formatting failed! Press any key to return.");
                 mvprintw(1, 2, "%s", err.c_str());
@@ -1553,7 +1638,7 @@ void configureExistingPartition(InstallConfig &config) {
             }
 
             std::string mountErr;
-            if (mountPartition("/dev/" + part.name, "/mnt", "ext4", mountErr) != 0) {
+            if (mountPartition("/dev/" + part.name, "/mnt", config.filesystem, mountErr) != 0) {
                 clear();
                 mvprintw(0, 2, "Mounting failed! Press any key to return.");
                 mvprintw(1, 2, "%s", mountErr.c_str());
@@ -1712,13 +1797,13 @@ void configureFreeSpace(InstallConfig &config) {
             refresh();
 
             std::string err;
-            if (formatPartition(newPartition, "ext4", err) != 0) {
+            if (formatPartition(newPartition, config.filesystem, err) != 0) {
                 showMessage({"Formatting " + newPartition + " failed:", err});
                 choosingRegion = false;
                 continue;
             }
 
-            if (mountPartition(newPartition, "/mnt", "ext4", err) != 0) {
+            if (mountPartition(newPartition, "/mnt", config.filesystem, err) != 0) {
                 showMessage({"Mounting " + newPartition + " failed:", err});
                 choosingRegion = false;
                 continue;
@@ -1792,14 +1877,14 @@ if (confirmDiskWipe(disks[selected])) {
         mvprintw(1, 2, "Please wait.");
         refresh();
 
-    if (formatPartitions(disks[selected])) {
+    if (formatPartitions(disks[selected], config.filesystem)) {
         clear();
         mvprintw(0, 2, "==> Mounting partitions...");
         mvprintw(1, 2, "Please wait.");
         refresh();
         sleep(2);
 
-    if (mountPartitions(disks[selected])) {
+    if (mountPartitions(disks[selected], config.filesystem)) {
         clear();
         mvprintw(0, 2, "Create a swapfile?");
         mvprintw(1, 2, "Recommended if you have 8GB RAM or less.");
@@ -1812,7 +1897,7 @@ if (confirmDiskWipe(disks[selected])) {
         mvprintw(0, 2, "==> Creating swapfile...");
         mvprintw(1, 2, "Please wait.");
         refresh();
-    if (!createSwapfile()) {
+    if (!createSwapfile(config.filesystem)) {
         clear();
         mvprintw(0, 2, "Swapfile creation failed! Continuing without swap.");
         mvprintw(1, 2, "Press any key to continue.");
@@ -1957,7 +2042,7 @@ void configureManualPartitioning(InstallConfig &config) {
         return;
     }
     int r = pickPartition("Which partition is the NaiadOS root ( / )?",
-                          "It will be FORMATTED as ext4.", rootCands);
+                          "It will be FORMATTED as " + config.filesystem + ".", rootCands);
     if (r < 0) return;
     PartInfo root = rootCands[r];
 
@@ -2016,7 +2101,7 @@ void configureManualPartitioning(InstallConfig &config) {
             clear();
             mvprintw(0, 2, "/dev/%s already holds a %s filesystem.", home.name.c_str(), home.fstype.c_str());
             mvprintw(2, 2, "[K] Keep it and its files (reuse an old /home)");
-            mvprintw(3, 2, "[F] Format it as ext4 (erase everything on it)");
+            mvprintw(3, 2, "[F] Format it as %s (erase everything on it)", config.filesystem.c_str());
             mvprintw(5, 2, "Esc to cancel.");
             refresh();
             int key;
@@ -2030,13 +2115,13 @@ void configureManualPartitioning(InstallConfig &config) {
     std::vector<std::string> summary = {
         "Manual partitioning on /dev/" + disk + ":",
         "",
-        "  /           /dev/" + root.name + "  -> FORMAT as ext4",
+        "  /           /dev/" + root.name + "  -> FORMAT as " + config.filesystem,
         "  /boot/efi   /dev/" + esp.name + "  -> " + (formatEsp ? "FORMAT as FAT32 (new, empty)" : "keep, mount only"),
     };
     if (useSwapPart) summary.push_back("  swap        /dev/" + swapPart.name + "  -> " + (swapPart.fstype == "swap" ? "use existing swap" : "FORMAT as swap"));
     else if (useSwapfile) summary.push_back("  swap        swapfile on root");
     else summary.push_back("  swap        none");
-    if (useHome) summary.push_back("  /home       /dev/" + home.name + "  -> " + (formatHome ? "FORMAT as ext4" : "keep existing files"));
+    if (useHome) summary.push_back("  /home       /dev/" + home.name + "  -> " + (formatHome ? "FORMAT as " + config.filesystem : "keep existing files"));
 
     std::vector<std::string> warnings;
     if (!dataWarning(root).empty()) warnings.push_back(dataWarning(root));
@@ -2055,7 +2140,7 @@ void configureManualPartitioning(InstallConfig &config) {
     refresh();
 
     std::string err;
-    if (formatPartition("/dev/" + root.name, "ext4", err) != 0) {
+    if (formatPartition("/dev/" + root.name, config.filesystem, err) != 0) {
         showMessage({"Formatting root /dev/" + root.name + " failed:", err});
         return;
     }
@@ -2067,12 +2152,12 @@ void configureManualPartitioning(InstallConfig &config) {
         showMessage({"Creating swap on /dev/" + swapPart.name + " failed:", err});
         return;
     }
-    if (useHome && formatHome && formatPartition("/dev/" + home.name, "ext4", err) != 0) {
+    if (useHome && formatHome && formatPartition("/dev/" + home.name, config.filesystem, err) != 0) {
         showMessage({"Formatting /home /dev/" + home.name + " failed:", err});
         return;
     }
 
-    if (mountPartition("/dev/" + root.name, "/mnt", "ext4", err) != 0) {
+    if (mountPartition("/dev/" + root.name, "/mnt", config.filesystem, err) != 0) {
         showMessage({"Mounting root failed:", err});
         return;
     }
@@ -2083,7 +2168,7 @@ void configureManualPartitioning(InstallConfig &config) {
     }
     if (useHome) {
         system("mkdir -p /mnt/home");
-        if (mountPartition("/dev/" + home.name, "/mnt/home", formatHome ? "ext4" : home.fstype, err) != 0) {
+        if (mountPartition("/dev/" + home.name, "/mnt/home", formatHome ? config.filesystem : home.fstype, err) != 0) {
             showMessage({"Mounting /home failed:", err});
             return;
         }
@@ -2092,7 +2177,7 @@ void configureManualPartitioning(InstallConfig &config) {
     if (useSwapPart && runWithError("swapon /dev/" + swapPart.name, err) != 0) {
         showMessage({"Enabling swap failed (continuing without it):", err});
     }
-    if (useSwapfile && !createSwapfile()) {
+    if (useSwapfile && !createSwapfile(config.filesystem)) {
         showMessage({"Swapfile creation failed! Continuing without swap."});
     }
 
@@ -2334,6 +2419,8 @@ bool installBasePackages(InstallConfig &config) {
     // os-prober lets grub-mkconfig list Windows and other Linux installs; it can only
     // look inside unmounted partitions through grub-mount, which needs fuse3
     if (config.bootloader == "GRUB") packages += " grub os-prober fuse3";
+    std::string fsPackage = filesystemPackage(config.filesystem);
+    if (!fsPackage.empty()) packages += " " + fsPackage;
 
     for (const auto &kernel : kernelPackages(config)) packages += " " + kernel;
 
@@ -2499,8 +2586,13 @@ bool configureChrootSystem(InstallConfig &config) {
         "sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers",
         "Sudoers")) return false;
 
+    // fsck only does something for ext4 and f2fs (fsck.xfs is a no-op, btrfs has none);
+    // the btrfs binary lets the initramfs assemble a btrfs root that spans several disks
+    bool fsckHook = (config.filesystem == "ext4" || config.filesystem == "f2fs");
+    std::string binaries = (config.filesystem == "btrfs") ? "btrfs" : "";
     if (!chrootRun(
-        "printf 'MODULES=()\\nBINARIES=()\\nFILES=()\\nHOOKS=(base udev autodetect modconf block filesystems keyboard fsck)\\n' > /etc/mkinitcpio.conf",
+        "printf 'MODULES=()\\nBINARIES=(" + binaries + ")\\nFILES=()\\nHOOKS=(base udev autodetect modconf block filesystems keyboard" +
+        std::string(fsckHook ? " fsck" : "") + ")\\n' > /etc/mkinitcpio.conf",
         "mkinitcpio config")) return false;
 
     for (const auto &kernel : kernelPackages(config)) {
@@ -2967,6 +3059,7 @@ void showInstallSummary(InstallConfig &config) {
     mvprintw(row++, 4, "Keyboard Layout: %s", config.keyboardLayout.empty() ? "Not set" : config.keyboardLayout.c_str());
     mvprintw(row++, 4, "Locale: %s", config.locale.empty() ? "Not set" : config.locale.c_str());
     mvprintw(row++, 4, "Disk: %s", config.diskDevice.empty() ? "Not set" : config.diskDevice.c_str());
+    mvprintw(row++, 4, "Filesystem: %s", config.filesystem.c_str());
     mvprintw(row++, 4, "Hostname: %s", config.hostname.empty() ? "Not set" : config.hostname.c_str());
     mvprintw(row++, 4, "Root Password: %s", config.rootPassword.empty() ? "Not set" : "********");
     if (config.users.empty()) {
@@ -3003,6 +3096,7 @@ void showMainMenu(InstallConfig &config) {
     std::vector<std::string> options = {
         "Keyboard Layout",
         "Locale",
+        "Filesystem",
         "Disk Configuration",
         "Hostname",
         "User Account",
@@ -3056,6 +3150,7 @@ void showMainMenu(InstallConfig &config) {
             else if (options[i] == "User Account") isConfigured = !config.users.empty();     
             else if (options[i] == "Profile") isConfigured = !config.uiChoice.empty();
             else if (options[i] == "Disk Configuration") isConfigured = !config.diskDevice.empty();
+            else if (options[i] == "Filesystem") isConfigured = !config.filesystem.empty();
             else if (options[i] == "Kernel") isConfigured = !config.kernel.empty();
             else if (options[i] == "Bootloader") isConfigured = !config.bootloader.empty();
 
@@ -3087,6 +3182,9 @@ void showMainMenu(InstallConfig &config) {
         }
         else if (options[selected] == "Root Password" && !config.rootPassword.empty()) {
             info = "Root password is set";
+        }
+        else if (options[selected] == "Filesystem") {
+            info = "Root filesystem: " + config.filesystem;
         }
         else if (options[selected] == "Kernel") {
             info = "Kernel: " + config.kernel;
@@ -3164,6 +3262,9 @@ bool showingDiskDetails = (options[selected] == "Disk Configuration" && !config.
             }
             else if (options[selected] == "Timezone") {
                 configureTimezone(config);
+            }
+            else if (options[selected] == "Filesystem") {
+                configureFilesystem(config);
             }
             else if (options[selected] == "Disk Configuration") {
                 configureDiskConfiguration(config);
