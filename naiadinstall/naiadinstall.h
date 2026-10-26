@@ -2330,7 +2330,7 @@ bool installBasePackages(InstallConfig &config) {
     showInstallProgress("Installing base system...");
 
     // fastfetch: the installer ships its NaiadOS config, the program has to come with it
-    std::string packages = "base linux-firmware efibootmgr networkmanager sudo mkinitcpio fastfetch";
+    std::string packages = "base linux-firmware efibootmgr networkmanager sudo mkinitcpio fastfetch naiados-keyring";
     // os-prober lets grub-mkconfig list Windows and other Linux installs; it can only
     // look inside unmounted partitions through grub-mount, which needs fuse3
     if (config.bootloader == "GRUB") packages += " grub os-prober fuse3";
@@ -2361,9 +2361,12 @@ bool installBasePackages(InstallConfig &config) {
     std::string cmd = "pacstrap /mnt " + packages;
     int result = system(cmd.c_str());
 
+    // pacstrap doesn't copy pacman.conf; installed systems get kernel and tool
+    // updates through the same repo as the live ISO
     if (result == 0) {
-        system("cp -r /root/naiados-repo /mnt/root/naiados-repo");
-        system("sed -i '/\\[naiados-repo\\]/,/^$/d' /mnt/etc/pacman.conf");
+        system("printf '\\n[naiados-repo]\\nSigLevel = Required DatabaseOptional\\n"
+               "Server = https://github.com/wvgaa/naiados-repo/releases/download/x86_64\\n'"
+               " >> /mnt/etc/pacman.conf");
     }
 
     return (result == 0);

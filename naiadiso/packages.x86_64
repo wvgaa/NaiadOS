@@ -1,5 +1,6 @@
 base
 linux-naiados-lts
+naiados-keyring
 linux-firmware
 mkinitcpio
 mkinitcpio-archiso

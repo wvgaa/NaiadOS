@@ -8,6 +8,7 @@ After=systemd-random-seed.service
 Type=oneshot
 ExecStart=/usr/bin/pacman-key --init
 ExecStart=/usr/bin/pacman-key --populate archlinux
+ExecStart=/usr/bin/pacman-key --populate naiados
 RemainAfterExit=yes
 
 [Install]

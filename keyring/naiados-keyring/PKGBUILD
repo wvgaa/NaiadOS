@@ -1,0 +1,13 @@
+pkgname=naiados-keyring
+pkgver=1
+pkgrel=1
+pkgdesc="NaiadOS package signing key"
+arch=('any')
+license=('GPL-3.0-or-later')
+install=naiados-keyring.install
+source=('naiados.gpg' 'naiados-trusted' 'naiados-revoked')
+sha256sums=('SKIP' 'SKIP' 'SKIP')
+
+package() {
+    install -Dm644 -t "$pkgdir/usr/share/pacman/keyrings" naiados.gpg naiados-trusted naiados-revoked
+}
