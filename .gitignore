@@ -17,3 +17,6 @@ naiadiso/airootfs/usr/bin/naiadinstall
 
 # makepkg logs
 kernel/build-*.log
+
+# kernel build files, copied in by tools/build-iso.sh
+naiadiso/airootfs/usr/share/naiados/kernel/

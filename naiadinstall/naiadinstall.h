@@ -84,7 +84,11 @@ struct InstallConfig {
     std::string timezone = "";
     std::string networkBackend = "";
     std::string filesystem = "ext4";   // root (and a formatted /home): ext4, btrfs, xfs or f2fs
-    std::string kernel = "LTS";
+    std::string kernel = "LTS";        // "LTS", "Stable", "Both" (prebuilt) or "Compile"
+    std::string compileSeries = "LTS"; // Compile: "LTS" or "Stable" sources
+    bool compileMenuconfig = false;    // Compile: open menuconfig before building
+    bool compileFallback = false;      // Compile: also install the prebuilt LTS
+    bool customKernelBuilt = false;    // set during the install once the build worked
     std::string bootloader = "GRUB";   // "GRUB" or "Existing" (install none, keep the machine's current one)
     bool freshEsp = false;             // the disk setup created a new, empty EFI partition
 };
@@ -128,11 +132,44 @@ std::string filesystemPackage(const std::string &fs) {
     return "";
 }
 
-// "Both" installs stable + LTS side by side, LTS stays in GRUB as the fallback
-std::vector<std::string> kernelPackages(const InstallConfig &config) {
+// Kernels pacstrap takes from the repo. "Both" installs stable + LTS side by
+// side, LTS stays in GRUB as the fallback; "Compile" only the optional fallback.
+std::vector<std::string> prebuiltKernels(const InstallConfig &config) {
     if (config.kernel == "Stable") return {"linux-naiados"};
     if (config.kernel == "Both") return {"linux-naiados", "linux-naiados-lts"};
+    if (config.kernel == "Compile") {
+        if (config.compileFallback) return {"linux-naiados-lts"};
+        return {};
+    }
     return {"linux-naiados-lts"};
+}
+
+// Every kernel on the new system, each gets a preset
+std::vector<std::string> kernelPackages(const InstallConfig &config) {
+    std::vector<std::string> kernels;
+    if (config.customKernelBuilt) kernels.push_back("linux-naiados-custom");
+    for (const auto &k : prebuiltKernels(config)) kernels.push_back(k);
+    return kernels;
+}
+
+// Rough build time from a measured ~20 min with 16 threads; laptops also
+// throttle, so the estimate is given as a range
+std::string compileTimeEstimate() {
+    long threads = sysconf(_SC_NPROCESSORS_ONLN);
+    if (threads < 1) threads = 1;
+    long low = 20 * 16 / threads;
+    if (low < 15) low = 15;
+    long high = low * 2;
+    return "about " + std::to_string(low) + "-" + std::to_string(high) + " minutes with " +
+           std::to_string(threads) + " CPU threads";
+}
+
+std::string describeKernel(const InstallConfig &config) {
+    if (config.kernel != "Compile") return config.kernel;
+    std::string text = "Compile " + std::string(config.compileSeries == "LTS" ? "LTS" : "latest stable");
+    if (config.compileMenuconfig) text += ", menuconfig";
+    if (config.compileFallback) text += ", prebuilt LTS fallback";
+    return text;
 }
 
 // package name -> suffix used by /boot/vmlinuz-<suffix> and /boot/initramfs-<suffix>.img
@@ -1067,16 +1104,76 @@ void configureAudio(InstallConfig &config) {
     }
 }
 
+// Small list picker for the Compile steps; returns the index or -1 on Esc
+int pickOption(const std::string &title, const std::vector<std::string> &hints,
+               const std::vector<std::string> &items, int selected) {
+    while (true) {
+        clear();
+        mvprintw(0, 2, "%s", title.c_str());
+        int row = 1;
+        for (const auto &hint : hints) mvprintw(row++, 2, "%s", hint.c_str());
+        row++;
+        for (int i = 0; i < (int)items.size(); i++) {
+            if (i == selected) attron(A_REVERSE);
+            mvprintw(row + i, 4, "%s", items[i].c_str());
+            if (i == selected) attroff(A_REVERSE);
+        }
+        mvprintw(row + (int)items.size() + 1, 2, "Esc to go back.");
+        refresh();
+        int key = getch();
+        if (key == KEY_UP) selected = (selected - 1 + (int)items.size()) % (int)items.size();
+        else if (key == KEY_DOWN) selected = (selected + 1) % (int)items.size();
+        else if (key == 10 || key == KEY_ENTER) return selected;
+        else if (key == 27) return -1;
+    }
+}
+
+// Compile: series -> how -> prebuilt fallback. Nothing changes unless every step is answered.
+bool configureCompileKernel(InstallConfig &config) {
+    std::string estimate = compileTimeEstimate();
+    std::vector<std::string> hints = {
+        "The kernel is built during the install, on the target disk, for this machine's CPU.",
+        "Do not copy it to another machine. Build time: " + estimate + "."
+    };
+
+    int series = pickOption("Compile: which kernel source?", hints,
+        {"LTS            - long-term support series, same version as linux-naiados-lts",
+         "Latest stable  - same version as linux-naiados"},
+        config.compileSeries == "Stable" ? 1 : 0);
+    if (series < 0) return false;
+
+    int how = pickOption("Compile: how?", hints,
+        {"Compile & use                   - the NaiadOS config, built for your CPU",
+         "Decide what's inside & compile  - opens menuconfig before the build"},
+        config.compileMenuconfig ? 1 : 0);
+    if (how < 0) return false;
+
+    int fallback = pickOption("Also install the prebuilt LTS kernel as a fallback?",
+        {"If your own kernel does not boot, you can pick the LTS in the GRUB menu.",
+         "If the build fails during the install, you are asked again."},
+        {"Yes  - linux-naiados-lts as a second boot entry",
+         "No   - only the kernel you compile"},
+        config.compileFallback ? 0 : 1);
+    if (fallback < 0) return false;
+
+    config.compileSeries = (series == 1) ? "Stable" : "LTS";
+    config.compileMenuconfig = (how == 1);
+    config.compileFallback = (fallback == 0);
+    return true;
+}
+
 void configureKernel(InstallConfig &config) {
     std::vector<std::string> options = {
         "LTS",
         "Stable",
-        "Both"
+        "Both",
+        "Compile"
     };
     std::vector<std::string> descriptions = {
         "linux-naiados-lts  - long-term support, the safe default",
         "linux-naiados      - latest stable kernel",
-        "both               - stable by default, LTS as a fallback GRUB entry"
+        "both               - stable by default, LTS as a fallback GRUB entry",
+        "compile            - build your own kernel during the install (" + compileTimeEstimate() + ")"
     };
 
     int selected = 0;
@@ -1107,8 +1204,15 @@ void configureKernel(InstallConfig &config) {
             if (selected >= (int)options.size()) selected = 0;
         }
         else if (key == 10 || key == KEY_ENTER) {
-            config.kernel = options[selected];
-            choosing = false;
+            if (options[selected] == "Compile") {
+                if (configureCompileKernel(config)) {
+                    config.kernel = "Compile";
+                    choosing = false;
+                }
+            } else {
+                config.kernel = options[selected];
+                choosing = false;
+            }
         }
         else if (key == 27) {
             choosing = false;
@@ -2396,19 +2500,22 @@ bool prepareLiveSystem() {
     return (system("pacman -Sy --noconfirm archlinux-keyring") == 0);
 }
 
-bool checkDiskSpace() {
-    showInstallProgress("Checking available disk space...");
+int freeGBOnMnt() {
     FILE* pipe = popen("df -BG /mnt | awk 'NR==2 {print $4}' | tr -d 'G'", "r");
-    if (!pipe) return false;
-    
+    if (!pipe) return 0;
+
     char buffer[32];
     int freeGB = 0;
     if (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
         freeGB = atoi(buffer);
     }
     pclose(pipe);
-    
-    return (freeGB >= 8);
+    return freeGB;
+}
+
+bool checkDiskSpace() {
+    showInstallProgress("Checking available disk space...");
+    return (freeGBOnMnt() >= 8);
 }
 
 bool installBasePackages(InstallConfig &config) {
@@ -2422,7 +2529,7 @@ bool installBasePackages(InstallConfig &config) {
     std::string fsPackage = filesystemPackage(config.filesystem);
     if (!fsPackage.empty()) packages += " " + fsPackage;
 
-    for (const auto &kernel : kernelPackages(config)) packages += " " + kernel;
+    for (const auto &kernel : prebuiltKernels(config)) packages += " " + kernel;
 
     if (config.uiChoice == "Hyprland") packages += " hyprland waybar wofi kitty sddm";
     else if (config.uiChoice == "i3") packages += " xorg-server i3-wm i3status dmenu rxvt-unicode lightdm lightdm-gtk-greeter";
@@ -2457,6 +2564,41 @@ bool installBasePackages(InstallConfig &config) {
     }
 
     return (result == 0);
+}
+
+// Compile: builds linux-naiados-custom into /mnt. If that fails, the prebuilt
+// LTS is used when it was chosen as the fallback, otherwise it is offered.
+bool buildCustomKernel(InstallConfig &config) {
+    std::string series = (config.compileSeries == "Stable") ? "linux-naiados" : "linux-naiados-lts";
+    std::string mode = config.compileMenuconfig ? "menuconfig" : "auto";
+    showInstallProgress("Compiling your kernel (" + compileTimeEstimate() + ")...");
+
+    bool built = false;
+    // sources and objects need 5-10 GB on top of the system
+    if (freeGBOnMnt() < 15) {
+        std::cout << "\n[ERROR] Not enough space to compile the kernel: at least 15 GB free on the target needed." << std::endl;
+    } else {
+        built = (system(("/usr/lib/naiadinstall/build-custom-kernel " + series + " " + mode).c_str()) == 0);
+        if (!built) std::cout << "\n[ERROR] The kernel build failed. Details are in the install log." << std::endl;
+    }
+    if (built) {
+        config.customKernelBuilt = true;
+        return true;
+    }
+
+    if (config.compileFallback) {
+        std::cout << "The prebuilt LTS kernel is installed; the install continues with it." << std::endl;
+        std::cout << "Press Enter to continue." << std::endl;
+        std::cin.get();
+        return true;
+    }
+    std::cout << "Install the prebuilt LTS kernel instead and continue? [y/N] " << std::flush;
+    std::string answer;
+    std::getline(std::cin, answer);
+    if (answer != "y" && answer != "Y") return false;
+    if (system("arch-chroot /mnt pacman -S --noconfirm linux-naiados-lts") != 0) return false;
+    config.compileFallback = true;
+    return true;
 }
 
 bool generateFstab() {
@@ -2515,11 +2657,15 @@ bool configureChrootSystem(InstallConfig &config) {
             "printf '%s\\n' 'GRUB_DISABLE_BOOTNEXT=true' >> /etc/default/grub",
             "Disable BootNext entries")) return false;
 
-        // grub-mkconfig would otherwise sort naiados-lts above naiados and boot LTS by default
-        if (config.kernel == "Both") {
+        // grub-mkconfig would otherwise sort naiados-lts above naiados (or the
+        // compiled kernel) and boot the fallback by default
+        std::string topLevel;
+        if (config.kernel == "Both") topLevel = "/boot/vmlinuz-naiados";
+        if (config.customKernelBuilt && config.compileFallback) topLevel = "/boot/vmlinuz-naiados-custom";
+        if (!topLevel.empty()) {
             if (!chrootRun(
                 "sed -i '/^#\\?GRUB_TOP_LEVEL=/d' /etc/default/grub && "
-                "printf '%s\\n' 'GRUB_TOP_LEVEL=\"/boot/vmlinuz-naiados\"' >> /etc/default/grub",
+                "printf '%s\\n' 'GRUB_TOP_LEVEL=\"" + topLevel + "\"' >> /etc/default/grub",
                 "GRUB default kernel")) return false;
         }
     }
@@ -2922,6 +3068,14 @@ void runInstallation(InstallConfig &config) {
         return;
     }
 
+    if (config.kernel == "Compile" && !buildCustomKernel(config)) {
+        std::cout << "\n[ERROR] No kernel was installed." << std::endl;
+        std::cout << "Press Enter to return to live environment." << std::endl;
+        std::cin.get();
+        log.stop(); initTUI();
+        return;
+    }
+
     if (!generateFstab()) {
         std::cout << "\n[ERROR] Failed to generate fstab!" << std::endl;
         std::cout << "Press Enter to return to live environment." << std::endl;
@@ -3075,7 +3229,7 @@ void showInstallSummary(InstallConfig &config) {
     mvprintw(row++, 4, "Audio: %s", config.audioSystem.empty() ? "Not set" : config.audioSystem.c_str());
     mvprintw(row++, 4, "Timezone: %s", config.timezone.empty() ? "Not set" : config.timezone.c_str());
     mvprintw(row++, 4, "Network: %s", config.networkBackend.empty() ? "Not set" : config.networkBackend.c_str());
-    mvprintw(row++, 4, "Kernel: %s", config.kernel.c_str());
+    mvprintw(row++, 4, "Kernel: %s", describeKernel(config).c_str());
     mvprintw(row++, 4, "Bootloader: %s", config.bootloader == "GRUB" ? "NaiadOS GRUB" : "keep existing (none installed)");
 
     mvprintw(row + 1, 2, "Press Y to begin with installation, any other key to go back.");
@@ -3187,7 +3341,7 @@ void showMainMenu(InstallConfig &config) {
             info = "Root filesystem: " + config.filesystem;
         }
         else if (options[selected] == "Kernel") {
-            info = "Kernel: " + config.kernel;
+            info = "Kernel: " + describeKernel(config);
         }
         else if (options[selected] == "Bootloader") {
             info = "Bootloader: " + std::string(config.bootloader == "GRUB" ? "NaiadOS GRUB" : "keep existing");

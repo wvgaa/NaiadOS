@@ -11,6 +11,7 @@ depends=(coreutils kmod mkinitcpio)
 makedepends=(bc cpio gettext libelf openssl pahole perl python tar xz zstd)
 options=(!debug !strip)
 source=("https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$pkgver.tar.xz"
+        "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$pkgver.tar.sign"
         config
         initramfs.sh
         90-$pkgname.hook
@@ -19,7 +20,12 @@ sha256sums=('4d6fba95c2244b08a7b4144a4d38b9be4fb31abb5e7682ae40bb5cb11374cfe0'
             'SKIP'
             'SKIP'
             'SKIP'
+            'SKIP'
             'SKIP')
+# kernel.org release keys: Linus Torvalds, Greg Kroah-Hartman, Sasha Levin
+validpgpkeys=(ABAF11C65A2970B130ABE3C479BE3E4300411886
+              647F28654894E3BD457199BE38DBBDC86092693E
+              E27E5D8A3403A2EF66873BBCDEA66FF797772CDC)
 
 prepare() {
   cd "linux-$pkgver"

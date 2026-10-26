@@ -1,0 +1,64 @@
+#!/bin/bash
+# Builds linux-naiados-custom for the CPU of this machine from the NaiadOS
+# kernel files of one series and installs it into /mnt. Runs in the live
+# system with the build directory on the target disk (5-10 GB).
+# usage: build-custom-kernel <linux-naiados|linux-naiados-lts> <auto|menuconfig>
+set -euo pipefail
+
+series=$1
+mode=$2
+files=/usr/share/naiados/kernel/$series
+work=/mnt/var/tmp/naiados-kernel
+user=naiadbuild
+pkgname=linux-naiados-custom
+
+[[ -f $files/PKGBUILD ]] || { echo "No kernel files for $series in the ISO"; exit 1; }
+
+cleanup() {
+    rm -rf "$work"
+    userdel "$user" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# makepkg refuses to run as root
+id "$user" >/dev/null 2>&1 || useradd -r -M -d "$work" -s /bin/bash "$user"
+rm -rf "$work"
+mkdir -p "$work/build" "$work/gnupg"
+cp "$files"/* "$work/build/"
+cd "$work/build"
+
+# the series' names become linux-naiados-custom / naiados-custom
+old=naiados
+[[ $series == linux-naiados-lts ]] && old=naiados-lts
+for f in initramfs.sh "90-$series.hook" "60-$series-remove.hook"; do
+    sed -i "s/\b$old\b/naiados-custom/g" "$f"
+done
+mv "90-$series.hook" "90-$pkgname.hook"
+mv "60-$series-remove.hook" "60-$pkgname-remove.hook"
+sed -i -e "s/^pkgname=.*/pkgname=$pkgname/" \
+       -e "s/^_suffix=.*/_suffix=naiados-custom/" \
+       -e "s/^pkgdesc=.*/pkgdesc=\"NaiadOS kernel compiled on and for this machine\"/" \
+       -e "/^  make olddefconfig/i\\  scripts/config --enable X86_NATIVE_CPU" PKGBUILD
+
+gpg --homedir "$work/gnupg" --quiet --import /usr/share/naiados/kernel.org-keys.asc
+chown -R "$user:" "$work"
+as_builder() {
+    runuser -u "$user" -- env GNUPGHOME="$work/gnupg" HOME="$work" "$@"
+}
+
+echo "==> Downloading and checking the kernel source..."
+as_builder makepkg --nobuild --nodeps --noconfirm
+
+if [[ $mode == menuconfig ]]; then
+    echo "==> Opening menuconfig. Save and exit when you are done."
+    sleep 2
+    as_builder make -C "$(ls -d src/linux-*/)" menuconfig </dev/tty >/dev/tty 2>&1
+fi
+
+echo "==> Compiling with $(nproc) threads. This takes a while."
+as_builder makepkg --noextract --nodeps --noconfirm
+
+pkg=$(ls "$pkgname"-*.pkg.tar.zst | head -1)
+cp "$pkg" /mnt/var/tmp/
+arch-chroot /mnt pacman -U --noconfirm "/var/tmp/$pkg"
+rm -f "/mnt/var/tmp/$pkg"

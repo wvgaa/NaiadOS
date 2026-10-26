@@ -20,6 +20,16 @@ e2fsprogs
 f2fs-tools
 arch-install-scripts
 ncurses
+base-devel
+bc
+cpio
+gettext
+libelf
+pahole
+perl
+python
+xz
+zstd
 iwd
 smartmontools
 reflector
