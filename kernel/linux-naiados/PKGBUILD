@@ -2,7 +2,7 @@
 pkgname=linux-naiados
 _suffix=naiados
 pkgver=7.2.7
-pkgrel=2
+pkgrel=3
 pkgdesc="The NaiadOS kernel (latest stable, debloated)"
 arch=(x86_64)
 url="https://www.kernel.org"
@@ -41,7 +41,7 @@ package() {
   install -Dm644 "$(make -s image_name)" "$pkgdir/boot/vmlinuz-$_suffix"
   install -Dm644 .config "$pkgdir/boot/config-$_suffix"
 
-  make INSTALL_MOD_PATH="$pkgdir/usr" INSTALL_MOD_STRIP=1 modules_install
+  ZSTD_CLEVEL=19 make INSTALL_MOD_PATH="$pkgdir/usr" INSTALL_MOD_STRIP=1 modules_install
   # points into the makepkg build dir, which won't exist on the target
   rm -f "$pkgdir/usr/lib/modules/$kernver/build"
 
