@@ -2521,6 +2521,9 @@ bool configureChrootSystem(InstallConfig &config) {
     // the icon behind LOGO=naiados in os-release (HyDE, GNOME/KDE about dialogs, login screens)
     system("mkdir -p /mnt/usr/share/pixmaps");
     system("cp /usr/share/pixmaps/naiados.png /mnt/usr/share/pixmaps/naiados.png");
+    // skips the systemd 262 socket coredump units on the LTS kernel (< 6.19)
+    system("mkdir -p /mnt/etc/systemd/system");
+    system("cp -r /etc/systemd/system/systemd-coredumpd.service.d /etc/systemd/system/systemd-coredump-register.service.d /mnt/etc/systemd/system/");
 
     return true;
 }
