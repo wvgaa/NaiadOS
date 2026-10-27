@@ -2608,6 +2608,8 @@ bool generateFstab() {
     return (result == 0);
 }
 
+std::string osReleaseValue(const std::string &key);
+
 bool configureChrootSystem(InstallConfig &config) {
     showInstallProgress("Configuring system...");
 
@@ -2623,12 +2625,17 @@ bool configureChrootSystem(InstallConfig &config) {
     // Same as the live ISO's. Values must stay quoted: scripts source this file
     // under set -e, and an unquoted ANSI_COLOR=1;36 runs "36" as a command
     // (killed grub-mkconfig's 31_efi_bootnext silently).
+    // VERSION is the release this system was installed from (the live ISO's)
+    std::string version = osReleaseValue("VERSION");
+    std::string versionId = osReleaseValue("VERSION_ID");
+    std::string versionLines = (version.empty() || versionId.empty()) ? "" :
+        "'VERSION=\"" + version + "\"' 'VERSION_ID=" + versionId + "' ";
     if (!chrootRun(
         "printf '%s\\n' "
         "'NAME=\"NaiadOS\"' "
         "'PRETTY_NAME=\"NaiadOS\"' "
         "'ID=naiados' "
-        "'ID_LIKE=arch' "
+        "'ID_LIKE=arch' " + versionLines +
         "'BUILD_ID=rolling' "
         "'ANSI_COLOR=\"1;36\"' "
         "'HOME_URL=\"https://naiados.org\"' "
@@ -3246,7 +3253,129 @@ void showInstallSummary(InstallConfig &config) {
 
 
 
+// Version of the live ISO, from its os-release (VERSION="1.0.5 beta"). The
+// installer copies it into the installed os-release, so the number lives in
+// one place: naiadiso/airootfs/etc/os-release.
+std::string osReleaseValue(const std::string &key) {
+    FILE *f = fopen("/etc/os-release", "r");
+    if (!f) return "";
+    std::string value;
+    char buffer[256];
+    while (fgets(buffer, sizeof(buffer), f) != nullptr) {
+        std::string line(buffer);
+        if (line.rfind(key + "=", 0) != 0) continue;
+        value = line.substr(key.size() + 1);
+        while (!value.empty() && (value.back() == '\n' || value.back() == '"')) value.pop_back();
+        if (!value.empty() && value.front() == '"') value.erase(0, 1);
+        break;
+    }
+    fclose(f);
+    // only digits, letters, dots and spaces go on into shell commands
+    for (char c : value)
+        if (!std::isalnum((unsigned char)c) && c != '.' && c != ' ') return "";
+    return value;
+}
+
+// Choices survive quitting the installer until the live system reboots. Disk
+// setup, users and passwords are not saved: disks can change in between, and
+// passwords never go to a file.
+const char *SAVED_CHOICES = "/root/.naiadinstall.conf";
+
+// values end up in shell commands, so a loaded value only keeps characters the
+// screens themselves produce (keymaps, locales, timezones, menu labels)
+bool safeSavedValue(const std::string &value) {
+    for (char c : value)
+        if (!std::isalnum((unsigned char)c) && std::string(" ._-/+()@").find(c) == std::string::npos) return false;
+    return true;
+}
+
+void saveChoices(const InstallConfig &config) {
+    FILE *f = fopen(SAVED_CHOICES, "w");
+    if (!f) return;
+    auto put = [f](const char *key, const std::string &value) {
+        fprintf(f, "%s=%s\n", key, value.c_str());
+    };
+    put("keyboardLayout", config.keyboardLayout);
+    put("locale", config.locale);
+    put("filesystem", config.filesystem);
+    put("hostname", config.hostname);
+    put("uiChoice", config.uiChoice);
+    put("audioSystem", config.audioSystem);
+    put("kernel", config.kernel);
+    put("compileSeries", config.compileSeries);
+    put("compileMenuconfig", config.compileMenuconfig ? "1" : "0");
+    put("compileFallback", config.compileFallback ? "1" : "0");
+    put("bootloader", config.bootloader);
+    put("timezone", config.timezone);
+    put("networkBackend", config.networkBackend);
+    fclose(f);
+}
+
+void loadChoices(InstallConfig &config) {
+    FILE *f = fopen(SAVED_CHOICES, "r");
+    if (!f) return;
+    char buffer[512];
+    while (fgets(buffer, sizeof(buffer), f) != nullptr) {
+        std::string line(buffer);
+        if (!line.empty() && line.back() == '\n') line.pop_back();
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = line.substr(0, eq);
+        std::string value = line.substr(eq + 1);
+        if (!safeSavedValue(value)) continue;
+
+        if (key == "keyboardLayout") config.keyboardLayout = value;
+        else if (key == "locale") config.locale = value;
+        else if (key == "filesystem") {
+            if (value == "ext4" || value == "btrfs" || value == "xfs" || value == "f2fs") config.filesystem = value;
+        }
+        else if (key == "hostname") {
+            // same rule as the Hostname screen
+            if (!value.empty() && value.size() <= 63 && value.front() != '-' && value.back() != '-' &&
+                std::all_of(value.begin(), value.end(), [](char c) { return std::isalnum((unsigned char)c) || c == '-'; }))
+                config.hostname = value;
+        }
+        else if (key == "uiChoice") config.uiChoice = value;
+        else if (key == "audioSystem") config.audioSystem = value;
+        else if (key == "kernel") {
+            if (value == "LTS" || value == "Stable" || value == "Both" || value == "Compile") config.kernel = value;
+        }
+        else if (key == "compileSeries") {
+            if (value == "LTS" || value == "Stable") config.compileSeries = value;
+        }
+        else if (key == "compileMenuconfig") config.compileMenuconfig = (value == "1");
+        else if (key == "compileFallback") config.compileFallback = (value == "1");
+        else if (key == "bootloader") {
+            if (value == "GRUB" || value == "Existing") config.bootloader = value;
+        }
+        else if (key == "timezone") config.timezone = value;
+        else if (key == "networkBackend") config.networkBackend = value;
+    }
+    fclose(f);
+}
+
+bool askYesNo(const std::vector<std::string> &lines, bool defaultYes) {
+    clear();
+    int row = 0;
+    for (const auto &l : lines) mvprintw(row++, 2, "%s", l.c_str());
+    mvprintw(row + 1, 2, "%s", defaultYes ? "[Y/n]" : "[y/N]");
+    refresh();
+    int key = getch();
+    if (key == 'y' || key == 'Y') return true;
+    if (key == 'n' || key == 'N') return false;
+    return defaultYes;
+}
+
 void showMainMenu(InstallConfig &config) {
+    if (access(SAVED_CHOICES, F_OK) == 0 &&
+        askYesNo({"Choices from your last session were saved.",
+                  "Load them? Disk setup, users and passwords have to be set again."}, true)) {
+        loadChoices(config);
+    }
+
+    std::string version = osReleaseValue("VERSION");
+    std::string title = " NaiadOS Installer " + (version.empty() ? "" : version + " ");
+
     std::vector<std::string> options = {
         "Keyboard Layout",
         "Locale",
@@ -3282,7 +3411,7 @@ void showMainMenu(InstallConfig &config) {
         werase(rightPanel);
         wattron(leftPanel, COLOR_PAIR(1));
         box(leftPanel, 0, 0);
-        mvwprintw(leftPanel, 0, 2, " NaiadOS Installer ");
+        mvwprintw(leftPanel, 0, 2, "%s", title.c_str());
         wattroff(leftPanel, COLOR_PAIR(1));
         wattron(rightPanel, COLOR_PAIR(1));
         box(rightPanel, 0, 0);
@@ -3448,6 +3577,10 @@ bool showingDiskDetails = (options[selected] == "Disk Configuration" && !config.
                 configureHostname(config);
             }
             else if (options[selected] == "Abort") {
+                if (askYesNo({"Save your choices for the next start of naiadinstall?",
+                              "Kept until reboot. Disk setup, users and passwords are not saved."}, true)) {
+                    saveChoices(config);
+                }
                 running = false;
             }
         }

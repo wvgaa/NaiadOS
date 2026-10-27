@@ -9,7 +9,8 @@
 
   [38;2;21;168;200m2. install[0m
     [1mnaiadinstall[0m    guided TUI installer
-                    kernel: LTS / Stable / Both
+                    kernel: LTS / Stable / Both / Compile
+                    filesystem: ext4 / btrfs / XFS / F2FS
     [1mby hand[0m         the Arch way: fdisk, pacstrap,
                     arch-chroot - all tools included
 
