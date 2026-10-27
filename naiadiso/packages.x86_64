@@ -22,6 +22,5 @@ arch-install-scripts
 ncurses
 iwd
 smartmontools
-naiadcheck
 reflector
 xfsprogs
