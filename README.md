@@ -10,11 +10,13 @@ Website: https://naiados.org
 
 - naiadinstall, an ncurses installer written in C++
   - disk setup: whole disk, free space, an existing partition, or manual partitioning with cfdisk
+  - root filesystem: ext4, btrfs, XFS or F2FS
   - kernel: LTS, Stable, or both
   - bootloader: NaiadOS GRUB with os-prober, or keep the existing one
   - users, locale, keyboard layout, timezone, network, audio and a choice of window managers and desktops
 - Two kernels built from a debloated config: linux-naiados (latest stable) and linux-naiados-lts
-- naiadcheck, a system health check (updates, disk health, services, orphans)
+- naiadcheck, a system health check (updates, disk health, services, orphans), installable from naiados-repo
+- Signed package repository: [naiados-repo](https://github.com/wvgaa/naiados-repo)
 - UEFI only live ISO
 
 ## Repository
@@ -36,7 +38,7 @@ cd naiadinstall
 g++ -march=x86-64 main.cpp -o naiadinstall -lncursesw
 ```
 
-Kernels and naiadcheck are built with makepkg. The ISO expects them in a local package repository (see naiadiso/pacman.conf), then:
+Kernels, naiadcheck and naiados-keyring are built with makepkg and published to naiados-repo with tools/publish-repo.sh. The ISO pulls them from there:
 
 ```
 sudo mkarchiso -v -w /var/tmp/naiadiso-work -o out naiadiso
@@ -45,7 +47,6 @@ sudo mkarchiso -v -w /var/tmp/naiadiso-work -o out naiadiso
 ## Roadmap
 
 - 1.0.5: build your own kernel from the installer
-- 1.0.6: filesystem choice (ext4, btrfs, XFS, F2FS)
 - 1.0 stable: December 2026
 
 ## License
