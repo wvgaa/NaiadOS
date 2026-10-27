@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Filesystem choice in the installer: ext4 (default), btrfs, XFS or F2FS for the root partition, in every disk mode. The swapfile is created the right way for each filesystem.
+- NaiadOS package repository on GitHub (wvgaa/naiados-repo). All packages and the database are signed; the naiados-keyring package installs the key.
+
+### Changed
+- Kernels (pkgrel 3): removed debug tracers, latency and scheduler statistics, kexec/kdump and Xen guest support. Kernel modules are compressed with zstd level 19 like Arch, installed size went from 189 MB to 160 MB.
+
+### Removed
+- naiadcheck from the live ISO. It is still in naiados-repo (pacman -S naiadcheck).
+
+### Fixed
+- "Dependency failed for Kernel Core Pattern Register" at boot on the LTS kernel. The new systemd coredump units need Linux 6.19 or newer and are now skipped on older kernels.
+- Installed systems did not have naiados-repo in /etc/pacman.conf, so the NaiadOS kernels never got updates.
+
 ## 1.0.4 beta (2026-09-25)
 
 ### Added
