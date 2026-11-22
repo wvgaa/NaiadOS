@@ -1,4 +1,5 @@
 clear
 cat /etc/issue
-echo
+. /etc/os-release
+printf '    %s %s live\n\n' "$NAME" "$VERSION"
 cat /etc/motd
