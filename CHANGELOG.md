@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.5 beta (2026-11-22)
 
 ### Added
 - Compile your own kernel in the installer: Kernel > Compile, then LTS or latest stable. "Compile & use" builds the NaiadOS config, "Decide what's inside & compile" opens menuconfig first. The source is checked against the kernel.org signing keys. LTS can be installed next to it as a fallback, and if the build fails the installer offers the prebuilt LTS kernel. Needs about 15 GB free and 30 to 60 minutes.
