@@ -3,10 +3,14 @@
 ## Unreleased
 
 ### Added
+- Compile your own kernel in the installer: Kernel > Compile, then LTS or latest stable. "Compile & use" builds the NaiadOS config, "Decide what's inside & compile" opens menuconfig first. The source is checked against the kernel.org signing keys. LTS can be installed next to it as a fallback, and if the build fails the installer offers the prebuilt LTS kernel. Needs about 15 GB free and 30 to 60 minutes.
+- The installer asks to save your choices when you quit (to /root/.naiadinstall.conf, without disk, users or passwords) and offers to load them on the next start.
+- The NaiadOS version (1.0.5 beta) shows in the installer title, on the live console and in the installed /etc/os-release.
 - Filesystem choice in the installer: ext4 (default), btrfs, XFS or F2FS for the root partition, in every disk mode. The swapfile is created the right way for each filesystem.
 - NaiadOS package repository on GitHub (wvgaa/naiados-repo). All packages and the database are signed; the naiados-keyring package installs the key.
 
 ### Changed
+- Live ISO welcome message: lists the kernel choices (including Compile) and filesystems, cleaner layout.
 - Kernels (pkgrel 3): removed debug tracers, latency and scheduler statistics, kexec/kdump and Xen guest support. Kernel modules are compressed with zstd level 19 like Arch, installed size went from 189 MB to 160 MB.
 
 ### Removed
