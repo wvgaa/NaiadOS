@@ -42,6 +42,7 @@ sed -i -e "s/^pkgname=.*/pkgname=$pkgname/" \
 
 gpg --homedir "$work/gnupg" --quiet --import /usr/share/naiados/kernel.org-keys.asc
 chown -R "$user:" "$work"
+chmod 700 "$work/gnupg"
 as_builder() {
     runuser -u "$user" -- env GNUPGHOME="$work/gnupg" HOME="$work" "$@"
 }
