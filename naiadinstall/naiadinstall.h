@@ -152,13 +152,14 @@ std::vector<std::string> kernelPackages(const InstallConfig &config) {
     return kernels;
 }
 
-// Rough build time from a measured ~20 min with 16 threads; laptops also
+// Rough build time: ~50 min with 16 threads on the HP laptop, from the
+// download to the installed package (zstd 19 modules included); laptops also
 // throttle, so the estimate is given as a range
 std::string compileTimeEstimate() {
     long threads = sysconf(_SC_NPROCESSORS_ONLN);
     if (threads < 1) threads = 1;
-    long low = 20 * 16 / threads;
-    if (low < 15) low = 15;
+    long low = 30 * 16 / threads;
+    if (low < 20) low = 20;
     long high = low * 2;
     return "about " + std::to_string(low) + "-" + std::to_string(high) + " minutes with " +
            std::to_string(threads) + " CPU threads";
